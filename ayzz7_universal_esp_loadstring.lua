@@ -540,9 +540,14 @@ local function updateScreenESP()
                         end
                     end
                 end
-                for _, adorn in ipairs(rec.adornments) do
-                    if adorn.Visible ~= config.exposedParts then
-                        adorn.Visible = false -- avoid drawing excluded or distant players before update
+                -- FIX: When enabled, the per-limb adornments must be visible.
+                -- The old code always assigned false, so the computed colors
+                -- never appeared even though the raycasts were running.
+                for i, adorn in ipairs(rec.adornments) do
+                    local part = rec.parts[i]
+                    local visible = config.exposedParts and part ~= nil and part.Parent ~= nil
+                    if adorn.Visible ~= visible then
+                        adorn.Visible = visible
                     end
                 end
             end
@@ -550,16 +555,24 @@ local function updateScreenESP()
     end
 end
 
-local function isExposed(part, origin, cameraRight)
-    -- The character itself is ignored in the raycast filter so a nearby arm
-    -- does not cause the torso (or the reverse) to appear "behind a wall".
-    local target = part.Position
-    if workspace:Raycast(origin, target - origin, rayParams) == nil then
-        return true
-    end
-    -- A second, offset ray catches partially exposed limbs.
-    local offset = cameraRight * math.min(0.4, part.Size.X * 0.32)
-    return workspace:Raycast(origin, target + offset - origin, rayParams) == nil
+local function rayClear(origin, target)
+    return workspace:Raycast(origin, target - origin, rayParams) == nil
+end
+
+local function isExposed(part, origin)
+    -- Four probe points (centre, top, left, right). Even if the limb centre
+    -- is covered, its tip or one side may be visible around a wall.
+    -- Early returns normally keep the number of rays well below four.
+    local center = part.Position
+    if rayClear(origin, center) then return true end
+
+    local cf, size = part.CFrame, part.Size
+    local up = cf.UpVector * (size.Y * 0.43)
+    if rayClear(origin, center + up) then return true end
+
+    local side = cf.RightVector * (size.X * 0.43)
+    if rayClear(origin, center + side) then return true end
+    return rayClear(origin, center - side)
 end
 
 local function updateExposure()
@@ -567,7 +580,6 @@ local function updateExposure()
     Camera = workspace.CurrentCamera
     if not Camera then return end
     local origin = Camera.CFrame.Position
-    local right = Camera.CFrame.RightVector
     local localCharacter = LocalPlayer.Character
     for _, rec in pairs(tracked) do
         if rec.active and rec.character and #rec.parts > 0 then
@@ -583,7 +595,7 @@ local function updateExposure()
                     if adorn.Size ~= part.Size * 1.025 then
                         adorn.Size = part.Size * 1.025
                     end
-                    local exposed = isExposed(part, origin, right)
+                    local exposed = isExposed(part, origin)
                     local wanted = exposed and VISIBLE_COLOR or HIDDEN_COLOR
                     if adorn.Color3 ~= wanted then
                         adorn.Color3 = wanted
