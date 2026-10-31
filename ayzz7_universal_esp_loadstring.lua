@@ -6,7 +6,8 @@ loadstring([=[
     Features: corner boxes, names, team-colored outline chams,
     optional health-based fill, team check, RGB palette,
     and per-body-part exposure indicators (green = clear sight,
-    white = blocked by world geometry).
+    white = blocked by world geometry). Name text + strokes use team
+    colors. Extended view distance: 5,000 studs.
 
     Client-side Roblox Luau. Uses ordinary Instances (no Drawing API).
     Visibility is approximate and intentionally updated at a reduced rate.
@@ -44,7 +45,7 @@ local config = {
 
 local BOX_INTERVAL = 1 / 30           -- GUI update: at most 30 FPS
 local EXPOSURE_INTERVAL = 0.20       -- Per-part rays: 5 times/second
-local MAX_DISTANCE = 900             -- Studs; lowers distant-player cost
+local MAX_DISTANCE = 5000            -- Studs; longer-range player ESP
 local BOX_THICKNESS = 2
 local VISIBLE_COLOR = Color3.fromRGB(0, 255, 65)
 local HIDDEN_COLOR = Color3.fromRGB(255, 255, 255)
@@ -351,6 +352,7 @@ local function removeCharacterVisuals(rec)
     rec.head = nil
     rec.root = nil
     rec.active = false
+    rec.lastExposureAt = nil
     for i = 1, 8 do rec.lines[i].Visible = false end
     rec.nameLabel.Visible = false
 end
@@ -403,7 +405,7 @@ local function makePlayer(player)
     local rec = {
         player = player, character = nil, humanoid = nil, root = nil, head = nil,
         highlight = nil, parts = {}, adornments = {}, lines = {},
-        active = false, connections = {}, rayIgnore = {},
+        active = false, connections = {}, rayIgnore = {}, lastExposureAt = nil,
     }
     tracked[player] = rec
     local container = create("Frame", {
@@ -415,9 +417,9 @@ local function makePlayer(player)
         rec.lines[i] = makeLine(container)
     end
     rec.nameLabel = create("TextLabel", {
-        BackgroundTransparency = 1, TextColor3 = currentAccent,
+        BackgroundTransparency = 1, TextColor3 = teamColor(player),
         Font = Enum.Font.GothamBold, TextSize = 13,
-        TextStrokeColor3 = Color3.fromRGB(0, 0, 0), TextStrokeTransparency = 0.15,
+        TextStrokeColor3 = teamColor(player), TextStrokeTransparency = 0.15,
         TextXAlignment = Enum.TextXAlignment.Center,
         Size = UDim2.fromOffset(200, 20), Visible = false,
         Text = player.DisplayName,
@@ -454,6 +456,7 @@ end
 
 local function hideScreen(rec)
     -- Always hide, even if this record was never onscreen.
+    if rec.active then rec.lastExposureAt = nil end
     rec.active = false
     for i = 1, 8 do rec.lines[i].Visible = false end
     rec.nameLabel.Visible = false
@@ -511,8 +514,13 @@ local function updateScreenESP()
                 if config.nameESP then
                     rec.nameLabel.Position = UDim2.fromOffset(
                         math.floor(top2D.X - 100 + 0.5), math.floor(y - 22 + 0.5))
-                    if rec.nameLabel.TextColor3 ~= currentAccent then
-                        rec.nameLabel.TextColor3 = currentAccent
+                    -- The name and the text outline always follow team changes.
+                    local nameTeamColor = teamColor(player)
+                    if rec.nameLabel.TextColor3 ~= nameTeamColor then
+                        rec.nameLabel.TextColor3 = nameTeamColor
+                    end
+                    if rec.nameLabel.TextStrokeColor3 ~= nameTeamColor then
+                        rec.nameLabel.TextStrokeColor3 = nameTeamColor
                     end
                 end
                 if rec.highlight then
@@ -581,24 +589,36 @@ local function updateExposure()
     if not Camera then return end
     local origin = Camera.CFrame.Position
     local localCharacter = LocalPlayer.Character
+    local now = os.clock()
     for _, rec in pairs(tracked) do
-        if rec.active and rec.character and #rec.parts > 0 then
-            -- Exclude the local avatar and the target's own limbs, but not walls.
-            local exclude = rec.rayIgnore
-            exclude[1] = rec.character
-            exclude[2] = localCharacter
-            rayParams.FilterDescendantsInstances = exclude
-            for i, part in ipairs(rec.parts) do
-                local adorn = rec.adornments[i]
-                if adorn and part.Parent then
-                    -- Only rebuild size if a game changed the part size.
-                    if adorn.Size ~= part.Size * 1.025 then
-                        adorn.Size = part.Size * 1.025
-                    end
-                    local exposed = isExposed(part, origin)
-                    local wanted = exposed and VISIBLE_COLOR or HIDDEN_COLOR
-                    if adorn.Color3 ~= wanted then
-                        adorn.Color3 = wanted
+        if rec.active and rec.character and rec.root and #rec.parts > 0 then
+            -- Longer range is cheaper: update distant limbs less often.
+            local distance = (rec.root.Position - origin).Magnitude
+            local interval = EXPOSURE_INTERVAL
+            if distance > 2500 then
+                interval = 0.8
+            elseif distance > 1000 then
+                interval = 0.4
+            end
+            if not rec.lastExposureAt or now - rec.lastExposureAt >= interval then
+                rec.lastExposureAt = now
+                -- Exclude local and target avatars but not the blocking walls.
+                local exclude = rec.rayIgnore
+                exclude[1] = rec.character
+                exclude[2] = localCharacter
+                rayParams.FilterDescendantsInstances = exclude
+                for i, part in ipairs(rec.parts) do
+                    local adorn = rec.adornments[i]
+                    if adorn and part.Parent then
+                        -- Only rebuild size if a game changed the part size.
+                        if adorn.Size ~= part.Size * 1.025 then
+                            adorn.Size = part.Size * 1.025
+                        end
+                        local exposed = isExposed(part, origin)
+                        local wanted = exposed and VISIBLE_COLOR or HIDDEN_COLOR
+                        if adorn.Color3 ~= wanted then
+                            adorn.Color3 = wanted
+                        end
                     end
                 end
             end
